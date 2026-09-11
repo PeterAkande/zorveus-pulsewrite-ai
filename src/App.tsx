@@ -50,7 +50,13 @@ export default function App(): React.JSX.Element {
       gatewayBaseURL={gatewayBaseURL}
       persistToken={true}
     >
-      <OAuthCallbackHandler />
+      <OAuthCallbackHandler
+        onSuccess={() => {
+          if (typeof window !== "undefined" && !window.opener) {
+            window.location.replace("/");
+          }
+        }}
+      />
 
       {/* Global Minimalist SaaS Navbar */}
       <Navbar currentPath={currentPath} onNavigate={navigateTo} />
