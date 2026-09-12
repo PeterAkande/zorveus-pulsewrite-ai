@@ -2,7 +2,7 @@ import type { Zorveus } from "@zorveus/sdk";
 import { ZorveusOpenAI } from "@zorveus/sdk/openai";
 import type { ArticleFormData, ImageStyle } from "../types";
 
-export const DEFAULT_CHAT_MODEL = "gemini/gemini-2.5-flash-lite";
+export const DEFAULT_CHAT_MODEL = "zorveus/qwen3.8-27b";
 export const DEFAULT_IMAGE_MODEL = "gemini/gemini-2.5-flash-image";
 export const DEFAULT_TTS_MODEL = "gemini/gemini-2.5-flash-preview-tts";
 export const DEFAULT_TTS_VOICE = "achird";
