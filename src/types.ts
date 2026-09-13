@@ -35,6 +35,8 @@ export interface ArticleResult {
   audioUrl: string | null;
   isGeneratingAudio: boolean;
   audioError?: string | null;
+  isDrafting?: boolean;
+  draftError?: string | null;
   readingTimeMinutes: number;
   wordCount: number;
   createdAt: string;

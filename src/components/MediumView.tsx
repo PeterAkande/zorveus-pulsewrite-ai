@@ -17,8 +17,11 @@ import {
 
 interface MediumViewProps {
   article: ArticleResult;
+  reasoning?: string;
+  hasAnswerStarted?: boolean;
   progress?: AgentProgress;
   onBackToForm: () => void;
+  onRetryDraft?: () => void;
   onRetryImage: () => void;
   onRetryAudio: () => void;
 }
@@ -27,9 +30,29 @@ interface MediumViewProps {
 
 /**
  * Parses markdown into skimmable, styled React elements.
+ * Attaches a ChatGPT-style inline blinking cursor to the last element while streaming.
  */
-function RenderMarkdownProse({ content }: { content: string }) {
-  if (!content) return null;
+function RenderMarkdownProse({
+  content,
+  isStreaming
+}: {
+  content: string;
+  isStreaming?: boolean;
+}) {
+  const streamingCursor = isStreaming ? (
+    <span className="streaming-cursor" aria-hidden="true" />
+  ) : null;
+
+  if (!content) {
+    if (isStreaming) {
+      return (
+        <div className="medium-prose">
+          <p>{streamingCursor}</p>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const lines = content.split("\n");
   const elements: React.JSX.Element[] = [];
@@ -98,13 +121,47 @@ function RenderMarkdownProse({ content }: { content: string }) {
 
     // Numbered list item
     if (/^\d+\.\s/.test(trimmed)) {
-      const match = trimmed.match(/^\d+\.\s(.*)/);
-      elements.push(<li key={`num-li-${i}`}>{parseInline(match ? match[1] : trimmed)}</li>);
+      const text = trimmed.replace(/^\d+\.\s/, "");
+      elements.push(<li key={`nli-${i}`}>{parseInline(text)}</li>);
       continue;
     }
 
-    // Paragraph
-    elements.push(<p key={`p-${i}`}>{parseInline(trimmed)}</p>);
+    // Italic subtitle right under the header
+    if (i < 4 && /^(\*|_)[^*_]+(\*|_)$/.test(trimmed)) {
+      elements.push(
+        <p key={`subtitle-${i}`} className="medium-prose-subtitle">
+          {parseInline(trimmed)}
+        </p>
+      );
+      continue;
+    }
+
+    // Standard paragraph
+    elements.push(
+      <p key={`p-${i}`}>
+        {parseInline(trimmed)}
+      </p>
+    );
+  }
+
+  // If streaming, attach cursor directly inside the last rendered element
+  if (isStreaming && elements.length > 0) {
+    const lastIdx = elements.length - 1;
+    const lastEl = elements[lastIdx];
+    elements[lastIdx] = React.cloneElement(
+      lastEl,
+      lastEl.props,
+      <>
+        {lastEl.props.children}
+        {streamingCursor}
+      </>
+    );
+  } else if (isStreaming) {
+    elements.push(
+      <p key="streaming-initial-p">
+        {streamingCursor}
+      </p>
+    );
   }
 
   return <div className="medium-prose">{elements}</div>;
@@ -114,11 +171,14 @@ function RenderMarkdownProse({ content }: { content: string }) {
  * Parses bold, italic, and inline code formatting.
  */
 function parseInline(text: string): React.ReactNode {
-  const parts = text.split(/(\*\*.*?\*\*|`.*?`)/g);
+  const parts = text.split(/(\*\*.*?\*\*|\*[^*]+?\*|`.*?`)/g);
 
   return parts.map((part, index) => {
     if (part.startsWith("**") && part.endsWith("**")) {
       return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+      return <em key={index}>{part.slice(1, -1)}</em>;
     }
     if (part.startsWith("`") && part.endsWith("`")) {
       return <code key={index}>{part.slice(1, -1)}</code>;
@@ -129,8 +189,11 @@ function parseInline(text: string): React.ReactNode {
 
 export function MediumView({
   article,
-  progress: _progress,
+  reasoning,
+  hasAnswerStarted,
+  progress,
   onBackToForm,
+  onRetryDraft,
   onRetryImage,
   onRetryAudio
 }: MediumViewProps): React.JSX.Element {
@@ -141,8 +204,29 @@ export function MediumView({
   const [copied, setCopied] = useState(false);
   const [claps, setClaps] = useState(18);
   const [isZipping, setIsZipping] = useState(false);
+  const [isClearedFromDom, setIsClearedFromDom] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const reasoningContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll reasoning text as live tokens arrive
+  useEffect(() => {
+    if (reasoningContainerRef.current) {
+      reasoningContainerRef.current.scrollTop = reasoningContainerRef.current.scrollHeight;
+    }
+  }, [reasoning]);
+
+  // Smoothly clear reasoning away once the article answer begins streaming
+  useEffect(() => {
+    if (!hasAnswerStarted) {
+      setIsClearedFromDom(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setIsClearedFromDom(true);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [hasAnswerStarted]);
 
   // Audio setup: strictly for live model audio from Zorveus Gateway
   useEffect(() => {
@@ -578,8 +662,61 @@ export function MediumView({
         )}
       </div>
 
-      {/* Prose Article Markdown Content */}
-      <RenderMarkdownProse content={article.content} />
+      {/* Live AI Reasoning Callout */}
+      {reasoning && !isClearedFromDom && (
+        <div
+          ref={reasoningContainerRef}
+          className={`medium-reasoning-callout ${hasAnswerStarted ? "cleared" : ""}`}
+        >
+          <div className="medium-reasoning-text">
+            {reasoning}
+          </div>
+        </div>
+      )}
+
+      {/* Article Drafting Error State */}
+      {(article.draftError || (progress?.step === "error" && progress.error)) && (
+        <div className="article-draft-error-card">
+          <div className="draft-error-header">
+            <AlertTriangle size={20} color="#DC2626" style={{ flexShrink: 0, marginTop: "2px" }} />
+            <div>
+              <div className="draft-error-title">Article Drafting Failed</div>
+              <div className="draft-error-detail">
+                {article.draftError || progress?.error}
+              </div>
+            </div>
+          </div>
+          <div className="draft-error-actions">
+            {onRetryDraft && (
+              <button
+                type="button"
+                onClick={onRetryDraft}
+                className="shadcn-btn-primary"
+                style={{ fontSize: "13px", padding: "8px 16px", gap: "6px" }}
+              >
+                <RefreshCw size={14} />
+                <span>Retry Drafting</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onBackToForm}
+              className="shadcn-btn-secondary"
+              style={{ fontSize: "13px", padding: "8px 16px" }}
+            >
+              <span>Back to Configuration</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Prose Article Markdown Content with Inline Streaming Cursor */}
+      {!article.draftError && progress?.step !== "error" && (
+        <RenderMarkdownProse
+          content={article.content}
+          isStreaming={article.isDrafting}
+        />
+      )}
 
       {/* Story Footer */}
       <div className="story-footer">

@@ -24,7 +24,10 @@ export function CreatePage(): React.JSX.Element {
   });
 
   const [article, setArticle] = useState<ArticleResult | null>(null);
+  const [reasoning, setReasoning] = useState("");
+  const [hasAnswerStarted, setHasAnswerStarted] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastFormDataRef = useRef<ArticleFormData | null>(null);
 
   const handleStartGeneration = async (data: ArticleFormData) => {
     if (!client) {
@@ -32,7 +35,10 @@ export function CreatePage(): React.JSX.Element {
       return;
     }
 
+    lastFormDataRef.current = data;
     setIsGenerating(true);
+    setReasoning("");
+    setHasAnswerStarted(false);
     setSubView("medium");
 
     // Initialize immediate article view with loader states
@@ -40,7 +46,7 @@ export function CreatePage(): React.JSX.Element {
       id: `art_${Date.now()}`,
       title: data.topic,
       subtitle: `An exploration of ${data.topic.toLowerCase()} for ${data.targetAudience.toLowerCase()}.`,
-      content: "Drafting article with Zorveus AI...",
+      content: "",
       coverImageUrl: "",
       isGeneratingImage: true,
       imageError: null,
@@ -48,6 +54,8 @@ export function CreatePage(): React.JSX.Element {
       audioUrl: null,
       isGeneratingAudio: false, // will start when text stream completes
       audioError: null,
+      isDrafting: true,
+      draftError: null,
       readingTimeMinutes: 1,
       wordCount: 0,
       createdAt: new Date().toLocaleDateString("en-US", {
@@ -118,8 +126,17 @@ export function CreatePage(): React.JSX.Element {
             };
           });
         },
-        abortControllerRef.current.signal
+        abortControllerRef.current.signal,
+        (_reasoningChunk, currentReasoning) => {
+          setReasoning(currentReasoning);
+        },
+        () => {
+          setHasAnswerStarted(true);
+        }
       );
+
+      // Text stream complete -> mark drafting finished
+      setArticle((prev) => (prev ? { ...prev, isDrafting: false, draftError: null } : null));
 
       // -------------------------------------------------------------
       // PHASE 3: TEXT STREAM COMPLETE -> SYNTHESIZE VOICE AUDIO
@@ -160,15 +177,24 @@ export function CreatePage(): React.JSX.Element {
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error("[PulseWrite] Drafting error:", err);
       setProgress({
         step: "error",
         message: "Generation encountered an issue.",
         error: errorMsg
       });
+      setArticle((prev) =>
+        prev ? { ...prev, isDrafting: false, draftError: errorMsg } : null
+      );
     } finally {
       setIsGenerating(false);
       abortControllerRef.current = null;
     }
+  };
+
+  const handleRetryDraft = async () => {
+    if (!lastFormDataRef.current || isGenerating) return;
+    await handleStartGeneration(lastFormDataRef.current);
   };
 
   const handleRetryImage = async () => {
@@ -222,8 +248,11 @@ export function CreatePage(): React.JSX.Element {
     return (
       <MediumView
         article={article}
+        reasoning={reasoning}
+        hasAnswerStarted={hasAnswerStarted}
         progress={progress}
         onBackToForm={handleBackToForm}
+        onRetryDraft={handleRetryDraft}
         onRetryImage={handleRetryImage}
         onRetryAudio={handleRetryAudio}
       />

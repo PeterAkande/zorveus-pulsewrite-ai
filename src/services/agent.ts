@@ -97,25 +97,103 @@ Target audience: ${data.targetAudience}
 Target length: approximately ${data.targetWordCount} words.
 ${points}
 Formatting instructions:
-1. Start with the article title as a Markdown H1 (# Title).
-2. Follow with a one-sentence italic subtitle right beneath the title.
-3. Write an engaging hook paragraph that draws the reader in.
-4. Structure the body with clear H2 (##) and H3 (###) headings.
-5. Include 1-2 blockquotes for notable thoughts.
-6. Provide concrete takeaways and a thoughtful conclusion.
-7. Do not include meta instructions or preamble. Begin directly with the # Title.`;
+1. Start with the article title as a Markdown H1 (# Title), followed by an empty line.
+2. Follow with a one-sentence italic subtitle (*Subtitle*), followed by an empty line.
+3. Paragraph spacing: always insert a blank line between every paragraph, heading, blockquote, and list. Never run thoughts together into a single dense block of text.
+4. Keep paragraphs skimmable and focused, between 2 and 4 sentences each.
+5. Structure the body with clear H2 (##) and H3 (###) section headings. Place an empty line before and after every heading.
+6. Place blockquotes (> quote text) on their own lines with blank lines above and below.
+7. Place each list item on its own line with blank lines separating the list from surrounding prose.
+8. Provide concrete takeaways and a thoughtful conclusion.
+9. Do not include meta commentary or preamble. Begin directly with the # Title.`;
+}
+
+interface StreamDelta {
+  content?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string | null;
 }
 
 /**
  * Streams article generation using either the native Zorveus SDK client or the Zorveus OpenAI adapter.
+ * Detects reasoning tokens (both via delta fields and in-band <think> tags) and reports them cleanly.
  */
 export async function streamArticleDraft(
   client: Zorveus | ZorveusOpenAI,
   formData: ArticleFormData,
   onChunk: (chunk: string, currentFullText: string) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onReasoningChunk?: (reasoningChunk: string, currentFullReasoning: string) => void,
+  onAnswerStart?: () => void
 ): Promise<string> {
   const prompt = buildArticlePrompt(formData);
+
+  let accumulatedContent = "";
+  let accumulatedReasoning = "";
+  let insideThinkTag = false;
+  let hasSignaledAnswerStart = false;
+
+  const processDelta = (delta: StreamDelta) => {
+    const reasoningDelta = delta.reasoning_content || delta.reasoning || "";
+    if (reasoningDelta) {
+      accumulatedReasoning += reasoningDelta;
+      onReasoningChunk?.(reasoningDelta, accumulatedReasoning);
+    }
+
+    const contentDelta = delta.content || "";
+    if (!contentDelta) return;
+
+    let remaining = contentDelta;
+
+    while (remaining.length > 0) {
+      if (!insideThinkTag) {
+        const startTagIndex = remaining.indexOf("<think>");
+        if (startTagIndex === -1) {
+          if (!hasSignaledAnswerStart && remaining.trim().length > 0) {
+            hasSignaledAnswerStart = true;
+            onAnswerStart?.();
+          }
+          accumulatedContent += remaining;
+          onChunk(remaining, accumulatedContent);
+          remaining = "";
+          continue;
+        }
+
+        const beforeTag = remaining.slice(0, startTagIndex);
+        if (beforeTag) {
+          if (!hasSignaledAnswerStart && beforeTag.trim().length > 0) {
+            hasSignaledAnswerStart = true;
+            onAnswerStart?.();
+          }
+          accumulatedContent += beforeTag;
+          onChunk(beforeTag, accumulatedContent);
+        }
+        insideThinkTag = true;
+        remaining = remaining.slice(startTagIndex + 7);
+      } else {
+        const endTagIndex = remaining.indexOf("</think>");
+        if (endTagIndex === -1) {
+          accumulatedReasoning += remaining;
+          onReasoningChunk?.(remaining, accumulatedReasoning);
+          remaining = "";
+          continue;
+        }
+
+        const reasoningPart = remaining.slice(0, endTagIndex);
+        if (reasoningPart) {
+          accumulatedReasoning += reasoningPart;
+          onReasoningChunk?.(reasoningPart, accumulatedReasoning);
+        }
+        insideThinkTag = false;
+        remaining = remaining.slice(endTagIndex + 8);
+      }
+    }
+
+    if (accumulatedReasoning && !insideThinkTag && !hasSignaledAnswerStart && accumulatedContent.trim().length > 0) {
+      hasSignaledAnswerStart = true;
+      onAnswerStart?.();
+    }
+  };
 
   if (client instanceof ZorveusOpenAI) {
     const stream = await client.chat.completions.create(
@@ -134,24 +212,35 @@ export async function streamArticleDraft(
         ],
         stream: true,
         temperature: 0.7,
+        enable_thinking: false,
+        extra_body: {
+          enable_thinking: false,
+          chat_template_kwargs: {
+            enable_thinking: false
+          }
+        },
         metadata: {
           app: "pulsewrite-ai",
           topic: formData.topic
         }
-      },
+      } as unknown as Parameters<typeof client.chat.completions.create>[0],
       { signal }
     );
 
-    let accumulated = "";
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta?.content || "";
+    for await (const chunk of stream as AsyncIterable<{ choices: Array<{ delta?: StreamDelta }> }>) {
+      const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
-      accumulated += delta;
-      onChunk(delta, accumulated);
+      processDelta(delta);
+    }
+
+    if (!accumulatedContent.trim()) {
+      throw new Error(
+        `Model (${formData.model || DEFAULT_CHAT_MODEL}) returned an empty response. Check model availability or try again.`
+      );
     }
 
     notifyZorveusActivity();
-    return accumulated;
+    return accumulatedContent;
   }
 
   const stream = await client.chat.completions.create(
@@ -169,21 +258,32 @@ export async function streamArticleDraft(
         }
       ],
       stream: true,
-      temperature: 0.7
-    },
+      temperature: 0.7,
+      enable_thinking: false,
+      extra_body: {
+        enable_thinking: false,
+        chat_template_kwargs: {
+          enable_thinking: false
+        }
+      }
+    } as unknown as Parameters<typeof client.chat.completions.create>[0],
     { signal }
   );
 
-  let accumulated = "";
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content || "";
+  for await (const chunk of stream as AsyncIterable<{ choices: Array<{ delta?: StreamDelta }> }>) {
+    const delta = chunk.choices[0]?.delta;
     if (!delta) continue;
-    accumulated += delta;
-    onChunk(delta, accumulated);
+    processDelta(delta);
+  }
+
+  if (!accumulatedContent.trim()) {
+    throw new Error(
+      `Model (${formData.model || DEFAULT_CHAT_MODEL}) returned an empty response. Check model availability or try again.`
+    );
   }
 
   notifyZorveusActivity();
-  return accumulated;
+  return accumulatedContent;
 }
 
 /**
